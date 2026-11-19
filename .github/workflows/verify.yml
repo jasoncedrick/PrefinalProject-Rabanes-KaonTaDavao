@@ -1,61 +1,132 @@
-name: Verify prefinal submission
+name: Prefinal rubric QA
 on:
   push:
     branches: [verify-submission]
 permissions:
   contents: read
 jobs:
-  verify:
+  rubric:
+    strategy:
+      fail-fast: false
+      matrix:
+        pass: [1, 2]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: 7690e00cb9610fbda70594491069b0ec0975b0b3
           persist-credentials: false
-      - name: Install Laravel, seed SQLite and build assets
+      - name: Fresh Laravel installation
         run: |
           composer install --no-interaction
           cp .env.example .env
           php artisan key:generate
           touch database/database.sqlite
           php artisan migrate:fresh --seed
+          php artisan migrate:rollback
+          php artisan migrate:fresh --seed
           npm install
           npm run build
-          php artisan route:list --except-vendor --no-ansi > routes.txt
           php artisan view:cache
-      - name: Verify seed counts and capture screenshots
+      - name: Exercise the rubric on this fresh database
         run: |
-          python -m pip install playwright
-          php artisan serve > /tmp/guide-server.log 2>&1 &
-          for i in {1..30}; do curl -fsS localhost:8000 > /dev/null && break; sleep 1; done
-          python - <<'PY'
-          import sqlite3
-          from playwright.sync_api import sync_playwright
+          python -m pip install requests beautifulsoup4
+          php artisan serve >/tmp/kaon.log 2>&1 &
+          for i in {1..30}; do curl -fsS localhost:8000 >/dev/null && break; sleep 1; done
+          cat >/tmp/guide_qa.py <<'PY'
+          import sqlite3, subprocess, json, re
+          from urllib.parse import urlparse, parse_qs
+          from pathlib import Path
+          import requests
+          from bs4 import BeautifulSoup
+          
           db=sqlite3.connect('database/database.sqlite')
+          def rows(q,*args): return db.execute(q,args).fetchall()
+          def col(q,*args): return [r[0] for r in rows(q,*args)]
+          def one(q,*args): return col(q,*args)[0]
+          assert not rows('pragma foreign_key_check')
           for t,n in [('districts',6),('features',6),('users',12),('eateries',15),('permits',15)]:
-              assert db.execute('select count(*) from '+t).fetchone()[0]==n
-          assert db.execute('select count(*) from eateries where is_open=0').fetchone()[0]==3
-          with sync_playwright() as p:
-              browser=p.chromium.launch(channel='chrome')
-              page=browser.new_page(viewport={'width':1280,'height':900})
-              def visit(path):
-                  assert page.goto('http://localhost:8000'+path).status==200,path
-              for path in ['/','/districts','/districts/1','/reviewers/1','/eateries']:
-                  visit(path)
-              assert page.locator('article').count()==6
-              page.screenshot(path='screenshots/eatery-list.png',full_page=True)
-              visit('/eateries/carinderia-ni-rabanes')
-              assert page.get_by_text('Lami kaayo! Balik-balikan ni Tita Rabanes.',exact=True).is_visible()
-              page.screenshot(path='screenshots/eatery-reviews.png',full_page=True)
-              visit('/eateries/create')
-              page.get_by_role('button',name='Save eatery').click()
-              page.get_by_text('Please check the form.').wait_for()
-              assert page.get_by_text('Pick at least one feature.').count()==2
-              page.screenshot(path='screenshots/create-errors.png',full_page=True)
-              browser.close()
+              assert one('select count(*) from '+t)==n,t
+          assert one('select count(*) from eateries where is_open=0')==3
+          assert set(col('select name from districts'))==set('Poblacion Talomo Agdao Buhangin Toril Tugbok'.split())
+          assert set(col('select name from features'))=={'Suki ni Rabanes','Budget Meal','Halal','Aircon','Open 24 Hours','Takeout'}
+          slug='carinderia-ni-rabanes'
+          eid=one('select id from eateries where slug=?',slug)
+          assert rows('select name,price,is_bestseller from dishes where eatery_id=? order by id',eid)==[('Tinolang Manok',85,1),('Kinilaw na Tuna',120,0),('Durian Shake',75,0)]
+          assert one('select count(*) from reviews where eatery_id=?',eid)>=3
+          assert one('select count(*) from reviews join eateries on eateries.id=reviews.eatery_id where is_open=0')==0
+          assert one("select count(*) from permits where expires_on<date('now')")>=1
+          for i,open_ in rows('select id,is_open from eateries where id!=?',eid):
+              for t,low,high in [('permits',1,1),('dishes',2,5),('eatery_feature',1,3),('reviews',0,6 if open_ else 0)]:
+                  assert low<=one('select count(*) from '+t+' where eatery_id=?',i)<=high
+          route_list=json.loads(subprocess.check_output(['php','artisan','route:list','--except-vendor','--json']))
+          assert len(route_list)==13
+          assert {r['name'] for r in route_list}==set('home districts.index districts.show eateries.index eateries.store eateries.create eateries.show eateries.update eateries.destroy eateries.edit eateries.reviews.store reviewers.show reviews.destroy'.split())
+          def page(path):
+              res=s.get(root+path);assert res.status_code==200,(path,res.status_code)
+              return BeautifulSoup(res.content,'html.parser')
+          def text(p): return ' '.join(p.stripped_strings)
+          def names(p): return [a.get_text(strip=True) for a in p.select('article h3 a')]
+          root='http://127.0.0.1:8000'; s=requests.Session()
+          home=page('/')
+          assert names(home)==col('select e.name from eateries e join reviews r on e.id=r.eatery_id group by e.id order by avg(r.rating) desc,e.name limit 3')
+          assert str(one('select count(*) from reviews'))+' reviews' in text(home)
+          assert '15 eateries' in text(home) and '6 districts' in text(home)
+          assert home.title.string=="Kaon Ta! Davao – Rabanes's Food Guide"
+          listing=page('/eateries')
+          assert names(listing)==col('select name from eateries order by name limit 6')
+          assert names(page('/eateries?page=2'))==col('select name from eateries order by name limit 6 offset 6')
+          dist=one("select id from districts where name='Poblacion'")
+          assert names(page('/eateries?q=Tinolang&district='+str(dist)+'&feature=Budget%20Meal'))==['Carinderia ni Rabanes']
+          assert 'No eateries match your filters.' in text(page('/eateries?q=nonmatching-specialty'))
+          for di,dn in rows('select id,name from districts'):
+              p=page('/districts/'+str(di))
+              count=one('select count(*) from reviews r join eateries e on r.eatery_id=e.id where e.district_id=?',di)
+              assert re.search(str(count)+r' reviews? in '+dn,text(p))
+              assert names(p)==col('select name from eateries where district_id=? order by name',di)
+          p=page('/eateries/'+slug)
+          assert 'Lami kaayo! Balik-balikan ni Tita Rabanes.' in text(p)
+          assert '₱85.00' in text(p) and 'Bestseller' in text(p)
+          assert s.get(root+'/eateries/no-such-eatery').status_code==404
+          for user, in rows('select id from users'):
+              p=page('/reviewers/'+str(user))
+              assert [a.text for a in p.select('article h2 a')]==col('select e.name from reviews r join eateries e on e.id=r.eatery_id where r.user_id=? order by r.created_at desc,r.id desc',user)
+          def submit(source,target,data,status=200):
+              start=page(source)
+              token=start.select_one('input[name="_token"]')['value']
+              res=s.post(root+target,data={'_token':token,**data},headers={'Referer':root+source})
+              assert res.status_code==status,(target,res.status_code)
+              return BeautifulSoup(res.content,'html.parser'),urlparse(res.url).path
+          base='/eateries'
+          create=base+'/create'
+          fresh={'name':'QA Sample Kitchen','district_id':dist,'address':'Sample Street','price_range':'mid','specialty':'Stew','features[]':['1','2'],'permit_no':'DVO-2099-9999','expires_on':'2099-12-01','is_open':'1'}
+          bad={**fresh,'name':'Carinderia ni Rabanes','permit_no':'bad','expires_on':'2001-01-01'}
+          del bad['features[]']
+          p,_=submit(create,base,bad)
+          for msg in ['Kaon Ta Rabanes already lists an eatery with this name.','Pick at least one feature.','Permit number must look like DVO-2026-0415.','The permit must not be expired.']:
+              assert sum(x.strip()==msg for x in p.stripped_strings)>=2,msg
+          assert p.select_one('input[name=address]')['value']=='Sample Street'
+          p,path=submit(create,base,fresh); assert path==base+'/qa-sample-kitchen' and 'Eatery added.' in text(p)
+          id_=one('select id from eateries where slug=?','qa-sample-kitchen')
+          p,_=submit(path+'/edit',path,{**fresh,'_method':'PUT'}); assert 'Eatery updated.' in text(p)
+          p,_=submit(path,path+'/reviews',{'body':'tiny','rating':6})
+          for msg in ['Choose who is writing this review.','Ratings go from 1 to 5 stars only.','Kaon Ta Rabanes: reviews need at least 10 characters.']:
+              assert sum(x.strip()==msg for x in p.stripped_strings)>=2,msg
+          review={'user_id':1,'rating':5,'body':'This is a sample review.'}
+          p,_=submit(path,path+'/reviews',review); assert 'Salamat! Review posted.' in text(p)
+          rid=one('select id from reviews where eatery_id=?',id_)
+          p,_=submit(path,'/reviews/'+str(rid),{'_method':'DELETE'}); assert 'Review deleted.' in text(p)
+          submit(path,path+'/reviews',review)
+          p,new=submit(path+'/edit',path,{**fresh,'_method':'PUT','name':'Renamed Kitchen','features[]':['3'],'is_open':0})
+          assert new==base+'/renamed-kitchen' and 'This eatery is closed. Reviews are paused.' in text(p)
+          assert col('select feature_id from eatery_feature where eatery_id=?',id_)==[3]
+          assert not p.select('textarea[name=body]')
+          submit(new,new+'/reviews',review,status=403)
+          assert one('select count(*) from reviews where eatery_id=?',id_)==1
+          p,out=submit(new,new,{'_method':'DELETE'}); assert out==base and 'Eatery deleted.' in text(p)
+          for t in ['permits','dishes','reviews','eatery_feature']: assert one('select count(*) from '+t+' where eatery_id=?',id_)==0
+          for image in ['eatery-list','eatery-reviews','create-errors']:
+              assert Path('screenshots/'+image+'.png').read_bytes()[:8]==b'\x89PNG\r\n\x1a\n'
+          print('PASS: schema integrity, seed distribution, 13 routes, read pages, ranking, filtering, errors, old input, CRUD, authorization, cleanup and three screenshots')
           PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: submission-evidence
-          path: |
-            routes.txt
-            screenshots/*.png
+          python /tmp/guide_qa.py
