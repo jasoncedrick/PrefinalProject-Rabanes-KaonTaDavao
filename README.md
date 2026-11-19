@@ -51,28 +51,36 @@ For the personalized class seed, set `GUIDE_DEMO_PASSWORD` to the shared passwor
 
 ## Routes
 
-Expected application routes. Run `php artisan route:list --except-vendor` after installation to print the live list.
+Output of `php artisan route:list --except-vendor`
 
-| Method | URI | Name |
-| --- | --- | --- |
-| GET/HEAD | / | home |
-| GET/HEAD | districts | districts.index |
-| GET/HEAD | districts/{district} | districts.show |
-| GET/HEAD | eateries | eateries.index |
-| POST | eateries | eateries.store |
-| GET/HEAD | eateries/create | eateries.create |
-| GET/HEAD | eateries/{eatery} | eateries.show |
-| PUT/PATCH | eateries/{eatery} | eateries.update |
-| DELETE | eateries/{eatery} | eateries.destroy |
-| GET/HEAD | eateries/{eatery}/edit | eateries.edit |
-| POST | eateries/{eatery}/reviews | eateries.reviews.store |
-| GET/HEAD | reviewers/{user} | reviewers.show |
-| DELETE | reviews/{review} | reviews.destroy |
+```text
+GET|HEAD        / .................................... home › HomeController
+  GET|HEAD        districts ....... districts.index › DistrictController@index
+  GET|HEAD        districts/{district} districts.show › DistrictController@sh…
+  GET|HEAD        eateries ........... eateries.index › EateryController@index
+  POST            eateries ........... eateries.store › EateryController@store
+  GET|HEAD        eateries/create .. eateries.create › EateryController@create
+  GET|HEAD        eateries/{eatery} .... eateries.show › EateryController@show
+  PUT|PATCH       eateries/{eatery} eateries.update › EateryController@update
+  DELETE          eateries/{eatery} eateries.destroy › EateryController@destr…
+  GET|HEAD        eateries/{eatery}/edit eateries.edit › EateryController@edit
+  POST            eateries/{eatery}/reviews eateries.reviews.store › ReviewCo…
+  GET|HEAD        reviewers/{user} .. reviewers.show › ReviewerController@show
+  DELETE          reviews/{review} reviews.destroy › ReviewController@destroy
 
-## Screenshots to capture from the running app
+                                                           Showing [13] routes
+```
 
-| File under `screenshots/` | Page |
-| --- | --- |
-| `eatery-list.png` | Open Eateries with no filters to show the cards and pagination. |
-| `eatery-reviews.png` | Open Carinderia ni Rabanes and scroll to Tita's review. |
-| `create-errors.png` | Open Add Eatery and submit the empty form to show validation errors. |
+## Screenshots
+
+### Eatery directory
+
+![Eatery directory](screenshots/eatery-list.png)
+
+### Carinderia ni Rabanes with resident reviews
+
+![Carinderia ni Rabanes with resident reviews](screenshots/eatery-reviews.png)
+
+### Create form showing validation errors
+
+![Create form showing validation errors](screenshots/create-errors.png)
