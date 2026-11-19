@@ -1,0 +1,61 @@
+name: Verify prefinal submission
+on:
+  push:
+    branches: [verify-submission]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Laravel, seed SQLite and build assets
+        run: |
+          composer install --no-interaction
+          cp .env.example .env
+          php artisan key:generate
+          touch database/database.sqlite
+          php artisan migrate:fresh --seed
+          npm install
+          npm run build
+          php artisan route:list --except-vendor --no-ansi > routes.txt
+          php artisan view:cache
+      - name: Verify seed counts and capture screenshots
+        run: |
+          python -m pip install playwright
+          php artisan serve > /tmp/guide-server.log 2>&1 &
+          for i in {1..30}; do curl -fsS localhost:8000 > /dev/null && break; sleep 1; done
+          python - <<'PY'
+          import sqlite3
+          from playwright.sync_api import sync_playwright
+          db=sqlite3.connect('database/database.sqlite')
+          for t,n in [('districts',6),('features',6),('users',12),('eateries',15),('permits',15)]:
+              assert db.execute('select count(*) from '+t).fetchone()[0]==n
+          assert db.execute('select count(*) from eateries where is_open=0').fetchone()[0]==3
+          with sync_playwright() as p:
+              browser=p.chromium.launch(channel='chrome')
+              page=browser.new_page(viewport={'width':1280,'height':900})
+              def visit(path):
+                  assert page.goto('http://localhost:8000'+path).status==200,path
+              for path in ['/','/districts','/districts/1','/reviewers/1','/eateries']:
+                  visit(path)
+              assert page.locator('article').count()==6
+              page.screenshot(path='screenshots/eatery-list.png',full_page=True)
+              visit('/eateries/carinderia-ni-rabanes')
+              assert page.get_by_text('Lami kaayo! Balik-balikan ni Tita Rabanes.',exact=True).is_visible()
+              page.screenshot(path='screenshots/eatery-reviews.png',full_page=True)
+              visit('/eateries/create')
+              page.get_by_role('button',name='Save eatery').click()
+              page.get_by_text('Please check the form.').wait_for()
+              assert page.get_by_text('Pick at least one feature.').count()==2
+              page.screenshot(path='screenshots/create-errors.png',full_page=True)
+              browser.close()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: submission-evidence
+          path: |
+            routes.txt
+            screenshots/*.png
